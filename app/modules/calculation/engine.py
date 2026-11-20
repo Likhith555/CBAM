@@ -436,3 +436,276 @@ def calculate_product_see(
         fallback_notes=fallback_notes,
         input_snapshot=input_snapshot,
     )
+
+
+# =====================================================================
+# Priority 1 engine core (Tasks 3 and 6)
+#
+#   Direct    = sum_i (Q_i x NCV_i x EF_i x OF_i) + Process
+#   Allocated = alpha x (shared fuel + shared process) + unshared terms
+#   SEE       = (Allocated direct + delta_CN x Allocated indirect + Precursors) / Production
+#
+# Everything is computed in floating point; rounding is for display only.
+# The same evaluation function is used for the deterministic result and for
+# every Monte Carlo draw, so the two can never disagree on the formula.
+# =====================================================================
+
+from typing import Any, Callable, Dict  # noqa: E402
+
+from app.config import settings  # noqa: E402
+from app.modules.calculation.unit_converter import (  # noqa: E402
+    FUEL_FORMS,
+    UnitError,
+    canonical_factor,
+    ncv_to_canonical,
+)
+from app.schemas.workspace import (  # noqa: E402
+    EngineInputs,
+    EngineResult,
+    EngineValue,
+    TermBreakdown,
+)
+
+
+class EngineInputError(ValueError):
+    """A resolved input is out of range or has an incompatible unit."""
+
+
+class IncompleteInputError(Exception):
+    """Raised when the engine is called on a workspace with open blocking gaps."""
+
+    def __init__(self, gaps: List[Any]):
+        self.gaps = gaps
+        keys = ", ".join(getattr(g, "input_key", str(g)) for g in gaps)
+        super().__init__(f"Calculation refused: required inputs are missing ({keys}).")
+
+
+_EF_UNITS = {"tco2/gj": 1.0, "kgco2/gj": 0.001, "kgco2/tj": 1e-6, "tco2/tj": 0.001}
+_GRID_UNITS = {"tco2/mwh": 1.0, "kgco2/kwh": 1.0, "kgco2/mwh": 0.001, "gco2/kwh": 0.001}
+
+Sampler = Callable[[EngineValue, str], Any]
+
+
+def _unit_key(unit: str) -> str:
+    return (unit or "").strip().lower().replace(" ", "").replace("₂", "2").replace("e/", "/")
+
+
+def _fuel_form(fuel_key: str, quantity_unit: str) -> str:
+    if fuel_key in FUEL_FORMS:
+        return FUEL_FORMS[fuel_key]
+    for form in ("liquid_fuel", "mass", "gas"):
+        try:
+            canonical_factor(quantity_unit, form)
+            return form
+        except UnitError:
+            continue
+    raise EngineInputError(f"Cannot tell the physical form of fuel '{fuel_key}' from unit '{quantity_unit}'.")
+
+
+def _validate_engine_inputs(inputs: EngineInputs) -> None:
+    def non_negative(ev: Optional[EngineValue], label: str):
+        if ev is not None and ev.value < 0:
+            raise EngineInputError(f"{label} cannot be negative (got {ev.value}).")
+
+    non_negative(inputs.target_production, "Target production")
+    non_negative(inputs.total_installation_production, "Installation production")
+    for fuel in inputs.fuels:
+        non_negative(fuel.quantity, f"Quantity of {fuel.name}")
+        if fuel.ncv.value <= 0:
+            raise EngineInputError(f"NCV of {fuel.name} must be greater than 0.")
+        if fuel.ef.value < 0:
+            raise EngineInputError(f"Emission factor of {fuel.name} cannot be negative.")
+        of = fuel.oxidation_factor.value
+        if not (0.0 <= of <= 1.0):
+            raise EngineInputError(f"Oxidation factor of {fuel.name} must be between 0 and 1 (got {of}).")
+    non_negative(inputs.electricity, "Electricity consumed")
+    non_negative(inputs.grid_ef, "Grid emission factor")
+    for prec in inputs.precursors:
+        non_negative(prec.quantity, f"Quantity of {prec.name}")
+        non_negative(prec.see, f"Supplier SEE of {prec.name}")
+    for src in inputs.process_sources:
+        non_negative(src.activity, f"Activity of process source {src.name}")
+        non_negative(src.factor, f"Factor of process source {src.name}")
+        non_negative(src.direct, f"Direct emissions of process source {src.name}")
+
+
+def _evaluate(inputs: EngineInputs, sample: Sampler) -> Dict[str, Any]:
+    """Evaluates the formula. ``sample`` returns a float or a numpy array per input."""
+    try:
+        target = sample(inputs.target_production, "production") * canonical_factor(
+            inputs.target_production.unit, "mass"
+        )
+        if inputs.utility_coverage == "dedicated":
+            alpha = 1.0
+        else:
+            if inputs.total_installation_production is None:
+                raise EngineInputError("Total installation production is required for a shared installation.")
+            total = sample(inputs.total_installation_production, "production") * canonical_factor(
+                inputs.total_installation_production.unit, "mass"
+            )
+            alpha = target / total
+
+        fuel_terms = []
+        for fuel in inputs.fuels:
+            form = _fuel_form(fuel.key, fuel.quantity.unit)
+            q = sample(fuel.quantity, "fuel") * canonical_factor(fuel.quantity.unit, form)
+            ncv = sample(fuel.ncv, "factor") * ncv_to_canonical(1.0, fuel.ncv.unit, form)
+            ef_scale = _EF_UNITS.get(_unit_key(fuel.ef.unit))
+            if ef_scale is None:
+                raise EngineInputError(f"Emission factor unit '{fuel.ef.unit}' must be tCO2/GJ.")
+            ef = sample(fuel.ef, "factor") * ef_scale
+            of = sample(fuel.oxidation_factor, "of")
+            raw = q * ncv * ef * of
+            fallback = any(v.source_type == "fallback" for v in (fuel.quantity, fuel.ncv, fuel.ef, fuel.oxidation_factor))
+            fuel_terms.append((fuel.key, fuel.name, raw, fuel.is_shared, fallback))
+
+        process_terms = []
+        for src in inputs.process_sources:
+            if src.method == "direct":
+                if src.direct is None:
+                    raise EngineInputError(f"Process source {src.name} needs a direct tCO2 value.")
+                raw = sample(src.direct, "process_direct")
+                fallback = src.direct.source_type == "fallback"
+            else:
+                if src.activity is None or src.factor is None:
+                    raise EngineInputError(f"Process source {src.name} needs activity data and a factor.")
+                raw = sample(src.activity, "process_activity") * sample(src.factor, "factor")
+                fallback = src.factor.source_type == "fallback"
+            process_terms.append((src.name, src.name, raw, src.is_shared, fallback))
+
+        scope2_raw = 0.0
+        scope2_fallback = False
+        if inputs.electricity is not None:
+            if inputs.grid_ef is None:
+                raise EngineInputError("A grid emission factor is required when electricity is consumed.")
+            grid_scale = _GRID_UNITS.get(_unit_key(inputs.grid_ef.unit))
+            if grid_scale is None:
+                raise EngineInputError(f"Grid factor unit '{inputs.grid_ef.unit}' must be tCO2/MWh.")
+            mwh = sample(inputs.electricity, "electricity") * canonical_factor(inputs.electricity.unit, "electricity")
+            scope2_raw = mwh * sample(inputs.grid_ef, "factor") * grid_scale
+            scope2_fallback = "fallback" in (inputs.electricity.source_type, inputs.grid_ef.source_type)
+
+        precursor_terms = []
+        for prec in inputs.precursors:
+            qty = sample(prec.quantity, "precursor") * canonical_factor(prec.quantity.unit, "mass")
+            see = sample(prec.see, "factor") * canonical_factor(prec.see.unit, "see")
+            precursor_terms.append((prec.key, prec.name, qty * see, False, prec.see.source_type == "fallback"))
+    except UnitError as exc:
+        raise EngineInputError(str(exc)) from exc
+
+    def allocate(raw, shared):
+        return raw * alpha if shared else raw
+
+    fuel_raw = sum((t[2] for t in fuel_terms), 0.0)
+    process_raw = sum((t[2] for t in process_terms), 0.0)
+    scope1_alloc = sum((allocate(t[2], t[3]) for t in fuel_terms + process_terms), 0.0)
+    scope2_alloc = allocate(scope2_raw, inputs.electricity_is_shared)
+    scope2_counted = scope2_alloc if inputs.includes_indirect else 0.0 * scope2_alloc
+    precursor_total = sum((t[2] for t in precursor_terms), 0.0)
+    total = scope1_alloc + scope2_counted + precursor_total
+    fallback_total = (
+        sum((allocate(t[2], t[3]) for t in fuel_terms + process_terms if t[4]), 0.0)
+        + (scope2_counted if scope2_fallback else 0.0)
+        + sum((t[2] for t in precursor_terms if t[4]), 0.0)
+    )
+    return {
+        "alpha": alpha,
+        "target": target,
+        "fuel_terms": fuel_terms,
+        "process_terms": process_terms,
+        "precursor_terms": precursor_terms,
+        "fuel_raw": fuel_raw,
+        "process_raw": process_raw,
+        "scope1_raw": fuel_raw + process_raw,
+        "scope1_alloc": scope1_alloc,
+        "scope2_raw": scope2_raw,
+        "scope2_alloc": scope2_alloc,
+        "scope2_counted": scope2_counted,
+        "scope2_fallback": scope2_fallback and inputs.includes_indirect,
+        "precursor_total": precursor_total,
+        "total": total,
+        "fallback_total": fallback_total,
+        "see": total / target,
+        "allocate": allocate,
+    }
+
+
+def data_quality_label(any_fallback_counted: bool, fallback_share: float, threshold: Optional[float] = None) -> str:
+    """A = all measured, B = fallbacks under the threshold, C = at or above it."""
+    threshold = settings.DQ_C_THRESHOLD if threshold is None else threshold
+    if not any_fallback_counted:
+        return "A"
+    return "B" if fallback_share < threshold else "C"
+
+
+def compute_emissions(inputs: EngineInputs) -> EngineResult:
+    """Deterministic Priority 1 engine. Returns the full breakdown."""
+    _validate_engine_inputs(inputs)
+    if inputs.target_production.value <= 0:
+        raise EngineInputError("Target production quantity must be greater than 0.")
+    if inputs.utility_coverage == "shared":
+        total = inputs.total_installation_production
+        if total is None or total.value <= 0:
+            raise EngineInputError("Total installation production must be greater than 0 for a shared installation.")
+
+    r = _evaluate(inputs, lambda ev, role: ev.value)
+    if r["alpha"] > 1.0 + 1e-12:
+        raise EngineInputError("Target production cannot exceed total installation production.")
+
+    allocate = r["allocate"]
+
+    def breakdown(terms):
+        return [
+            TermBreakdown(key=k, name=n or k, raw_tco2=raw, allocated_tco2=allocate(raw, shared), fallback_based=fb)
+            for k, n, raw, shared, fb in terms
+        ]
+
+    any_fallback = (
+        any(t[4] for t in r["fuel_terms"] + r["process_terms"] + r["precursor_terms"]) or r["scope2_fallback"]
+    )
+    share = r["fallback_total"] / r["total"] if r["total"] > 0 else 0.0
+
+    factor_ids: List[int] = []
+    values: List[Optional[EngineValue]] = [inputs.target_production, inputs.total_installation_production,
+                                          inputs.electricity, inputs.grid_ef]
+    for fuel in inputs.fuels:
+        values += [fuel.quantity, fuel.ncv, fuel.ef, fuel.oxidation_factor]
+    for src in inputs.process_sources:
+        values += [src.activity, src.factor, src.direct]
+    for prec in inputs.precursors:
+        values += [prec.quantity, prec.see]
+    for ev in values:
+        if ev is not None and ev.factor_id is not None and ev.factor_id not in factor_ids:
+            factor_ids.append(ev.factor_id)
+
+    notes = []
+    if inputs.precursors and all(p.directly_attributable for p in inputs.precursors):
+        notes.append("Precursor emissions are not allocated: the precursors are directly attributable to the target product.")
+    if not inputs.includes_indirect:
+        notes.append("Indirect (Scope 2) emissions are calculated but not counted for this CN code.")
+
+    return EngineResult(
+        alpha=r["alpha"],
+        fuels=breakdown(r["fuel_terms"]),
+        process=breakdown(r["process_terms"]),
+        precursors=[
+            TermBreakdown(key=k, name=n or k, raw_tco2=raw, allocated_tco2=raw, fallback_based=fb)
+            for k, n, raw, _, fb in r["precursor_terms"]
+        ],
+        scope1_fuel_raw_tco2=r["fuel_raw"],
+        process_raw_tco2=r["process_raw"],
+        scope1_raw_tco2=r["scope1_raw"],
+        scope1_allocated_tco2=r["scope1_alloc"],
+        scope2_raw_tco2=r["scope2_raw"],
+        scope2_allocated_tco2=r["scope2_alloc"],
+        scope2_counted_tco2=r["scope2_counted"],
+        precursor_tco2=r["precursor_total"],
+        total_tco2=r["total"],
+        target_production_t=r["target"],
+        see_tco2_per_t=r["see"],
+        fallback_tco2=r["fallback_total"],
+        fallback_share=share,
+        data_quality_label=data_quality_label(any_fallback, share),
+        factor_ids_used=factor_ids,
+        notes=notes,
+    )

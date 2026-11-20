@@ -1,8 +1,10 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type {
+  ActorRole,
   DocumentExtractionResult,
   DeterministicCalculationResult,
+  ProcessDeclaration,
 } from '@/lib/cbam-api'
 
 export type Workspace = {
@@ -19,6 +21,9 @@ export type Workspace = {
   precursor_cn_code: string
   precursor_material_name: string
   precursor_country: string
+  /** ISO dates (inclusive) bounding the reporting window, used by billing-period checks. */
+  reporting_start?: string
+  reporting_end?: string
 }
 
 export type Allocation = {
@@ -41,7 +46,19 @@ export type FieldOverride = {
   api_synced: boolean
 }
 
-export type ReviewStatus = 'Draft' | 'User-Confirmed' | 'Expert-Reviewed'
+export type ReviewStatus =
+  | 'Draft'
+  | 'User-Confirmed'
+  | 'Expert-Reviewed'
+  | 'Externally Verified'
+
+/** A value typed in to fill a data gap (e.g. a lab NCV), with its evidence reference. */
+export type ManualValue = { value: number; unit: string; evidence_ref: string }
+
+/** Prototype "acting as" selector; real authentication is future work. */
+export type ActingAs = { name: string; role: ActorRole }
+
+export const DEFAULT_PROCESS: ProcessDeclaration = { mode: null, reason: '', sources: [] }
 
 type CbamState = {
   workspace: Workspace
@@ -50,6 +67,12 @@ type CbamState = {
   overrides: Record<string, FieldOverride>
   calculation: DeterministicCalculationResult | null
   reviewStatus: ReviewStatus
+  process: ProcessDeclaration
+  manualValues: Record<string, ManualValue>
+  actingAs: ActingAs
+  setProcess: (process: ProcessDeclaration) => void
+  setManualValue: (key: string, value: ManualValue | null) => void
+  setActingAs: (actingAs: Partial<ActingAs>) => void
   setWorkspace: (workspace: Partial<Workspace>) => void
   setAllocation: (allocation: Partial<Allocation>) => void
   addDocument: (document: DocumentExtractionResult) => void
@@ -96,6 +119,19 @@ export const useCbamStore = create<CbamState>()(
       overrides: {},
       calculation: null,
       reviewStatus: 'Draft',
+      process: DEFAULT_PROCESS,
+      manualValues: {},
+      actingAs: { name: '', role: 'exporter' },
+      setProcess: (process) => set({ process }),
+      setManualValue: (key, value) =>
+        set((state) => {
+          const manualValues = { ...state.manualValues }
+          if (value) manualValues[key] = value
+          else delete manualValues[key]
+          return { manualValues }
+        }),
+      setActingAs: (actingAs) =>
+        set((state) => ({ actingAs: { ...state.actingAs, ...actingAs } })),
       setWorkspace: (workspace) =>
         set((state) => ({ workspace: { ...state.workspace, ...workspace } })),
       setAllocation: (allocation) =>
@@ -132,6 +168,8 @@ export const useCbamStore = create<CbamState>()(
           overrides: {},
           calculation: null,
           reviewStatus: 'Draft',
+          process: DEFAULT_PROCESS,
+          manualValues: {},
         }),
     }),
     { name: 'cbam-passport-store-real-data-v2', version: 2 },

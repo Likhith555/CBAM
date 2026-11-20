@@ -122,6 +122,27 @@ export function WorkspacePage() {
                   placeholder='Enter the reporting period from your records'
                 />
               </div>
+              <div className='space-y-2'>
+                <Label htmlFor='reporting_start'>Reporting window start</Label>
+                <Input
+                  id='reporting_start'
+                  type='date'
+                  value={form.reporting_start ?? ''}
+                  onChange={(e) => update('reporting_start', e.target.value)}
+                />
+              </div>
+              <div className='space-y-2'>
+                <Label htmlFor='reporting_end'>Reporting window end (inclusive)</Label>
+                <Input
+                  id='reporting_end'
+                  type='date'
+                  value={form.reporting_end ?? ''}
+                  onChange={(e) => update('reporting_end', e.target.value)}
+                />
+                <p className='text-xs text-muted-foreground'>
+                  Used to flag bills that overlap, leave gaps, or fall outside the window.
+                </p>
+              </div>
             </CardContent>
           </Card>
 

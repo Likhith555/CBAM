@@ -1,0 +1,71 @@
+........................................................................ [ 69%]
+................................                                         [100%]
+=============================== warnings summary ===============================
+tests/test_stage5_rag_and_reporting.py::test_generate_passport_pdf
+  /usr/local/lib/python3.13/site-packages/reportlab/lib/abag.py:19: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x7fec2031f880>
+    self.__dict__.update(attr)
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+================================ tests coverage ================================
+_______________ coverage: platform linux, python 3.13.18-final-0 _______________
+
+Name                                          Stmts   Miss  Cover   Missing
+---------------------------------------------------------------------------
+app/__init__.py                                   1      0   100%
+app/api/__init__.py                               0      0   100%
+app/api/calculation_router.py                    32     19    41%   27-70, 79-90
+app/api/document_router.py                      161      7    96%   71, 96-99, 159, 210
+app/api/passport_router.py                       93      4    96%   109-110, 128-129
+app/api/registry_router.py                       33      1    97%   45
+app/api/reporting_router.py                      39      7    82%   24, 29-30, 50-51, 70-71
+app/api/workspace_router.py                     198     32    84%   160-161, 166-170, 188, 205-213, 225-226, 234, 236-237, 257-263, 276, 284-285, 294
+app/config.py                                    33      0   100%
+app/db/__init__.py                                3      0   100%
+app/db/database.py                               34      8    76%   18-22, 48, 53, 59, 63
+app/db/models.py                                314      0   100%
+app/db/seed.py                                   51      5    90%   230-233, 239
+app/main.py                                      31      6    81%   18-20, 50, 58-59
+app/modules/__init__.py                           0      0   100%
+app/modules/audit/__init__.py                     0      0   100%
+app/modules/audit/log.py                         19      0   100%
+app/modules/calculation/__init__.py               0      0   100%
+app/modules/calculation/engine.py               297     23    92%   47, 63, 66, 79, 90, 106, 120, 129, 135, 137, 176, 178, 188, 204, 208, 218, 234, 289-290, 328, 330, 499, 542
+app/modules/calculation/factors.py               46     10    78%   48-49, 65, 82, 94-99, 112
+app/modules/calculation/unit_converter.py        95     10    89%   90, 96, 98, 100, 102, 104, 126, 144, 230, 241
+app/modules/calculation/workspace_calc.py        64      1    98%   94
+app/modules/document_ai/__init__.py               0      0   100%
+app/modules/document_ai/extractor.py             65     10    85%   9, 17, 31, 38, 89-93, 133
+app/modules/document_ai/generate_samples.py     171    171     0%   3-467
+app/modules/document_ai/metadata.py              38     11    71%   17-18, 37, 42, 46, 50-55
+app/modules/document_ai/parser.py                74     34    54%   18-19, 38-43, 57-66, 80, 102-122, 124, 128
+app/modules/gaps/__init__.py                      0      0   100%
+app/modules/gaps/fallbacks.py                   134      3    98%   142, 196-197
+app/modules/gaps/register.py                    177      5    97%   83, 201-204, 216-217
+app/modules/rag/__init__.py                       0      0   100%
+app/modules/rag/assistant.py                     21      1    95%   19
+app/modules/rag/indexer.py                      155     83    46%   27-28, 33-34, 55, 67-116, 121-128, 149-175, 183, 200, 202-204, 209, 213-219, 226, 248
+app/modules/registry/__init__.py                  0      0   100%
+app/modules/registry/factors.py                 116      0   100%
+app/modules/reporting/__init__.py                 0      0   100%
+app/modules/reporting/csv_generator.py           74      6    92%   83-86, 104, 110
+app/modules/reporting/pdf_generator.py          241      6    98%   273, 428, 537, 588, 601, 666
+app/modules/review/__init__.py                    0      0   100%
+app/modules/review/status.py                    132      0   100%
+app/modules/uncertainty/__init__.py               0      0   100%
+app/modules/uncertainty/monte_carlo.py          108     11    90%   31, 48, 61, 114, 118, 137, 146, 159-162, 165
+app/modules/validation/__init__.py                0      0   100%
+app/modules/validation/rules.py                 255     14    95%   96-97, 113-115, 245, 268, 297, 334-337, 364, 420
+app/schemas/__init__.py                           8      0   100%
+app/schemas/audit.py                             16      0   100%
+app/schemas/calculation.py                       85      0   100%
+app/schemas/common.py                            21      0   100%
+app/schemas/company.py                           44      0   100%
+app/schemas/document.py                          65      0   100%
+app/schemas/rag.py                               17      0   100%
+app/schemas/registry.py                          31      0   100%
+app/schemas/workspace.py                        131      0   100%
+---------------------------------------------------------------------------
+TOTAL                                          3723    488    87%
+104 passed, 1 warning in 16.92s

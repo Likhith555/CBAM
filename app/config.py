@@ -27,6 +27,20 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3")
 
+    # Data-quality label thresholds (Task 3). PLACEHOLDERS to agree with the mentor:
+    # A = all measured, B = fallback share below DQ_C_THRESHOLD, C = at or above it.
+    DQ_C_THRESHOLD: float = 0.20
+
+    # Fixed tolerances (+/- fraction at 95 %) for measured inputs in the Monte Carlo.
+    # Fallback inputs use the distribution stored on their register row instead.
+    MC_TOL_ELECTRICITY: float = 0.02
+    MC_TOL_FUEL: float = 0.05
+    MC_TOL_PRECURSOR: float = 0.03
+    MC_TOL_MEASURED_FACTOR: float = 0.0  # document-backed factors are taken as stated unless a tolerance is given
+    MC_TOL_PROCESS_DIRECT: float = 0.05
+    MC_DEFAULT_SEED: int = 42
+    MC_DEFAULT_ITERATIONS: int = 5000
+
     # Embeddings
     EMBEDDING_MODEL_NAME: str = "all-MiniLM-L6-v2"
 

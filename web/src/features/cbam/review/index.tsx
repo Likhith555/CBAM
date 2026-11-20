@@ -1,5 +1,6 @@
-﻿import { useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from '@tanstack/react-router'
+import { CheckCircle2, Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import {
@@ -21,13 +22,26 @@ import {
 import { Separator } from '@/components/ui/separator'
 import { Textarea } from '@/components/ui/textarea'
 import { Main } from '@/components/layout/main'
-import { overrideField, type ExtractedFieldCandidate } from '@/lib/cbam-api'
+import {
+  ApiError,
+  approveField,
+  getFieldsWithReview,
+  getWorkspaceDocuments,
+  overrideField,
+  validateWorkspace,
+  type DocumentRecordWithMeta,
+  type ExtractedFieldCandidate,
+  type FieldAuditWithReview,
+  type Finding,
+} from '@/lib/cbam-api'
 import {
   overrideKey,
   useCbamStore,
   type FieldOverride,
 } from '@/stores/cbam-store'
+import { ActingAs } from '../components/acting-as'
 import { CbamTopBar } from '../components/cbam-top-bar'
+import { FindingsPanel } from '../components/findings-panel'
 import { PageHeader } from '../components/page-header'
 import { StatusBadge } from '../components/status-badge'
 import { StepIndicator } from '../components/step-indicator'
@@ -45,20 +59,47 @@ function prettyField(name: string) {
 function FieldReview({
   documentHash,
   field,
+  serverField,
+  errors,
+  onChanged,
 }: {
   documentHash: string
   field: ExtractedFieldCandidate
+  serverField?: FieldAuditWithReview
+  errors: Finding[]
+  onChanged: () => void
 }) {
   const overrides = useCbamStore((state) => state.overrides)
   const setOverride = useCbamStore((state) => state.setOverride)
+  const actor = useCbamStore((state) => state.actingAs.name)
   const existing = overrides[overrideKey(documentHash, field.field_name)]
+  const [approving, setApproving] = useState(false)
+
+  const approve = async () => {
+    if (!serverField) return
+    if (!actor.trim()) {
+      toast.error('Enter your name in "Acting as" first.')
+      return
+    }
+    setApproving(true)
+    try {
+      await approveField(serverField.id, actor.trim())
+      toast.success(`${prettyField(field.field_name)} approved.`)
+      onChanged()
+    } catch (cause) {
+      const problems = cause instanceof ApiError ? cause.problems : []
+      toast.error(problems.length ? `Blocked: ${problems.join(' ')}` : cause instanceof Error ? cause.message : 'Approval failed.')
+    } finally {
+      setApproving(false)
+    }
+  }
 
   const [value, setValue] = useState(
     String(existing?.override_value ?? field.extracted_value)
   )
   const [unit, setUnit] = useState(existing?.override_unit ?? field.unit)
   const [reason, setReason] = useState(existing?.override_reason ?? '')
-  const [reviewer, setReviewer] = useState(existing?.user_id ?? '')
+  const [reviewer, setReviewer] = useState(existing?.user_id ?? actor)
   const [saving, setSaving] = useState(false)
 
   const save = async () => {
@@ -80,7 +121,7 @@ function FieldReview({
       return
     }
     setSaving(true)
-    let synced = false
+    let synced: boolean
     try {
       await overrideField({
         document_hash: documentHash,
@@ -108,8 +149,9 @@ function FieldReview({
     }
     setOverride(overrideKey(documentHash, field.field_name), payload)
     setSaving(false)
+    onChanged()
     if (synced) {
-      toast.success('Override saved to the backend audit ledger.')
+      toast.success('Override saved to the backend audit ledger. Approve the field again.')
     } else {
       toast.warning(
         'Override applied in this workspace, but the backend did not confirm it.'
@@ -134,6 +176,24 @@ function FieldReview({
             ) : (
               <StatusBadge label='AI extracted' variant='primary' />
             )}
+            {errors.length > 0 && (
+              <StatusBadge label={`${errors.length} open error`} variant='fallback' />
+            )}
+            {serverField?.reviewed ? (
+              <StatusBadge label={`Approved · ${serverField.reviewed_by}`} variant='primary' />
+            ) : (
+              <Button
+                size='sm'
+                variant='outline'
+                className='h-7'
+                disabled={!serverField || errors.length > 0 || approving}
+                title={errors.length ? 'Resolve or waive the open errors first' : undefined}
+                onClick={() => void approve()}
+              >
+                {approving ? <Loader2 className='size-3.5 animate-spin' /> : <CheckCircle2 className='size-3.5' />}
+                Approve field
+              </Button>
+            )}
           </div>
         </div>
         <CardDescription>
@@ -154,6 +214,20 @@ function FieldReview({
               {field.extracted_value} {field.unit}
             </span>
           </p>
+          {serverField?.canonical_value != null && (
+            <p className='text-sm text-muted-foreground'>
+              Canonical:{' '}
+              <span className='font-mono'>
+                {serverField.canonical_value.toLocaleString()} {serverField.canonical_unit}
+              </span>{' '}
+              (original value and unit kept)
+            </p>
+          )}
+          {errors.map((error) => (
+            <p key={error.id} className='rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200'>
+              {error.message}
+            </p>
+          ))}
           {existing && (
             <div className='rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100'>
               <p className='font-semibold'>Audit diff</p>
@@ -226,12 +300,53 @@ function FieldReview({
 
 export function ReviewPage() {
   const documents = useCbamStore((state) => state.documents)
+  const workspace = useCbamStore((state) => state.workspace)
   const reviewStatus = useCbamStore((state) => state.reviewStatus)
-  const setReviewStatus = useCbamStore((state) => state.setReviewStatus)
   const hashes = Object.keys(documents)
   const [selected, setSelected] = useState<string>(hashes[0] ?? '')
+  const [findings, setFindings] = useState<Finding[]>([])
+  const [records, setRecords] = useState<DocumentRecordWithMeta[]>([])
+  const [serverFields, setServerFields] = useState<FieldAuditWithReview[]>([])
+  const [validating, setValidating] = useState(false)
+  const workspaceId = workspace.installation_id.trim()
 
   const document = documents[selected]
+
+  const refresh = useCallback(async () => {
+    if (!workspaceId) return
+    setValidating(true)
+    try {
+      const [nextFindings, nextRecords] = await Promise.all([
+        validateWorkspace(workspaceId),
+        getWorkspaceDocuments(workspaceId),
+      ])
+      setFindings(nextFindings)
+      setRecords(nextRecords)
+      if (selected) setServerFields(await getFieldsWithReview(selected).catch(() => []))
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : 'Validation request failed.')
+    } finally {
+      setValidating(false)
+    }
+  }, [workspaceId, selected])
+
+  useEffect(() => {
+    const timer = setTimeout(() => void refresh(), 0)
+    return () => clearTimeout(timer)
+  }, [refresh])
+
+  const documentNames = useMemo(
+    () => Object.fromEntries(records.map((record) => [record.id, record.filename])),
+    [records]
+  )
+  const selectedRecord = records.find((record) => record.document_hash === selected)
+  const openErrors = (fieldId?: number) =>
+    findings.filter(
+      (f) =>
+        f.status === 'open' &&
+        f.severity === 'error' &&
+        (f.field_id === fieldId || (f.field_id == null && f.document_id === selectedRecord?.id))
+    )
 
   return (
     <>
@@ -240,13 +355,29 @@ export function ReviewPage() {
         <StepIndicator current={3} />
         <PageHeader
           title='Review extraction'
-          description='Compare each candidate against its source snippet. Corrections are logged with a reviewer and justification for verifiers.'
+          description='Compare each candidate against its source snippet, resolve validation findings, and approve each field. Corrections are logged with a reviewer and justification for verifiers.'
         >
           <StatusBadge
             label={reviewStatus}
             variant={reviewStatus === 'Draft' ? 'neutral' : 'primary'}
           />
         </PageHeader>
+
+        <Card className='mb-4'>
+          <CardContent className='py-4'>
+            <ActingAs compact />
+          </CardContent>
+        </Card>
+
+        {workspaceId && hashes.length > 0 && (
+          <FindingsPanel
+            findings={findings}
+            loading={validating}
+            onValidate={() => void refresh()}
+            onChanged={() => void refresh()}
+            documentNames={documentNames}
+          />
+        )}
 
         {hashes.length === 0 ? (
           <Card>
@@ -293,7 +424,8 @@ export function ReviewPage() {
                         Fields
                       </p>
                       <p className='text-sm font-medium'>
-                        {document.extracted_fields.length}
+                        {document.extracted_fields.length} ·{' '}
+                        {serverFields.filter((f) => f.reviewed).length} approved
                       </p>
                     </div>
                     <div className='min-w-0'>
@@ -315,40 +447,30 @@ export function ReviewPage() {
                     </CardContent>
                   </Card>
                 ) : (
-                  document.extracted_fields.map((field) => (
-                    <FieldReview
-                      key={`${selected}-${field.field_name}`}
-                      documentHash={selected}
-                      field={field}
-                    />
-                  ))
+                  document.extracted_fields.map((field) => {
+                    const serverField = serverFields.find((f) => f.field_name === field.field_name)
+                    return (
+                      <FieldReview
+                        key={`${selected}-${field.field_name}`}
+                        documentHash={selected}
+                        field={field}
+                        serverField={serverField}
+                        errors={openErrors(serverField?.id)}
+                        onChanged={() => void refresh()}
+                      />
+                    )
+                  })
                 )}
 
                 <Separator />
                 <div className='flex flex-wrap items-center justify-between gap-3'>
                   <p className='text-sm text-muted-foreground'>
-                    Confirming marks this evidence pack as reviewed by a named
-                    person. It does not certify emissions.
+                    When every field is approved and no errors are open, confirm the passport on the Passport step.
+                    Confirmation does not certify emissions.
                   </p>
-                  <div className='flex gap-2'>
-                    <Button
-                      variant='outline'
-                      onClick={() => {
-                        setReviewStatus('Draft')
-                        toast.success('Marked as draft.')
-                      }}
-                    >
-                      Mark draft
-                    </Button>
-                    <Button
-                      onClick={() => {
-                        setReviewStatus('User-Confirmed')
-                        toast.success('Evidence pack marked user-confirmed.')
-                      }}
-                    >
-                      Mark user-confirmed
-                    </Button>
-                  </div>
+                  <Button asChild>
+                    <Link to='/allocation'>Continue to allocation</Link>
+                  </Button>
                 </div>
               </div>
             )}
@@ -358,4 +480,3 @@ export function ReviewPage() {
     </>
   )
 }
-

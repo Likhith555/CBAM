@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import List, Optional
 from pydantic import BaseModel, Field
 from app.schemas.common import BaseSchema, DocCategory, FieldCategory
@@ -42,6 +42,14 @@ class DocumentRecordRead(BaseSchema):
     page_count: int
     file_size_bytes: int
     created_at: datetime
+    supplier: Optional[str] = None
+    account_number: Optional[str] = None
+    utility_type: Optional[str] = None
+    bill_number: Optional[str] = None
+    bill_date: Optional[date] = None
+    period_start: Optional[date] = None
+    period_end: Optional[date] = None
+    is_excluded: bool = False
 
 
 class ExtractedFieldAuditRead(BaseSchema):
@@ -61,3 +69,10 @@ class ExtractedFieldAuditRead(BaseSchema):
     modified_by_user_id: Optional[str]
     override_reason: Optional[str]
     created_at: datetime
+    field_category: Optional[str] = None
+    field_type: Optional[str] = None
+    canonical_value: Optional[float] = None
+    canonical_unit: Optional[str] = None
+    reviewed: bool = False
+    reviewed_by: Optional[str] = None
+    reviewed_at: Optional[datetime] = None

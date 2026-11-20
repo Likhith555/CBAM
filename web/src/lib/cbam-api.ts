@@ -187,6 +187,23 @@ export interface PassportExportPayload {
   review_status?: string;
 }
 
+/** Error carrying the HTTP status and the parsed JSON body (409 / 422 bodies hold details). */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly body: unknown,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+
+  get problems(): string[] {
+    const detail = (this.body as { detail?: { problems?: string[] } } | null)?.detail;
+    return detail && typeof detail === "object" && Array.isArray(detail.problems) ? detail.problems : [];
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${V1}${path}`, {
     ...init,
@@ -195,15 +212,22 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     let detail = `HTTP ${response.status}`;
+    let body: unknown = null;
     try {
-      const body = (await response.json()) as { detail?: string };
-      if (body?.detail) detail = body.detail;
+      body = await response.json();
+      const raw = (body as { detail?: unknown })?.detail;
+      if (typeof raw === "string") detail = raw;
+      else if (raw && typeof raw === "object" && "message" in raw) detail = String((raw as { message: string }).message);
     } catch {
       /* non-JSON error body */
     }
-    throw new Error(detail);
+    throw new ApiError(detail, response.status, body);
   }
   return (await response.json()) as T;
+}
+
+function json(method: string, payload: unknown): RequestInit {
+  return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) };
 }
 
 export async function checkHealth(): Promise<{ status: string; version: string }> {
@@ -296,4 +320,354 @@ export function saveBlob(blob: Blob, filename: string): void {
   anchor.download = filename;
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+
+// =====================================================================
+// Priority 1: workspaces, validation findings, data gaps, fallbacks,
+// review status workflow and the emission-factor register.
+// =====================================================================
+
+export interface SourcedValue {
+  value: number | null;
+  unit?: string | null;
+  evidence_ref?: string | null;
+  rel_uncertainty?: number | null;
+}
+
+export interface ProcessSource {
+  name: string;
+  method: "activity" | "direct";
+  activity_quantity?: number | null;
+  activity_unit?: string | null;
+  factor_key?: string | null;
+  direct_tco2?: number | null;
+  evidence_ref?: string | null;
+  is_shared?: boolean;
+}
+
+export interface ProcessDeclaration {
+  mode: "none" | "sources" | null;
+  reason?: string | null;
+  sources: ProcessSource[];
+}
+
+export interface WorkspaceInputs {
+  cn_code: string | null;
+  includes_indirect: boolean;
+  production: {
+    product_family: string | null;
+    target: SourcedValue;
+    total_installation: SourcedValue;
+    utility_coverage: "shared" | "dedicated";
+  };
+  uses_fuel: boolean;
+  fuels: {
+    fuel_key: string;
+    name: string;
+    quantity: SourcedValue;
+    ncv: SourcedValue;
+    ef: SourcedValue;
+    oxidation_factor: SourcedValue;
+    is_shared: boolean;
+  }[];
+  electricity: { consumed: SourcedValue; grid_ef: SourcedValue; is_shared: boolean };
+  precursors: {
+    key: string;
+    name: string;
+    cn_code: string | null;
+    country_of_origin: string | null;
+    quantity: SourcedValue;
+    supplier_see: SourcedValue;
+    directly_attributable: boolean;
+  }[];
+  process: ProcessDeclaration;
+}
+
+export interface Gap {
+  id: number;
+  input_key: string;
+  description: string;
+  fallback_available: boolean;
+  fallback_allowed_flag: boolean | null;
+  status: "open" | "filled_by_user" | "fallback_applied" | "waived";
+  created_at: string;
+  resolved_at: string | null;
+  resolved_by: string | null;
+}
+
+export interface GapSummary {
+  workspace_id: string;
+  calc_status: "Incomplete" | "Ready";
+  factor_set_version: string | null;
+  gaps: Gap[];
+  open_gaps: number;
+  pending_fallbacks: number;
+}
+
+export interface WorkspaceState extends GapSummary {
+  company_name: string | null;
+  installation_name: string | null;
+  cn_code: string | null;
+  reporting_start: string | null;
+  reporting_end: string | null;
+  open_errors: number;
+  open_warnings: number;
+  passport: { version_number: number; status: string; input_hash: string; has_result: boolean } | null;
+}
+
+export interface Finding {
+  id: number;
+  rule_id: "V1_UNIT" | "V2_OVERLAP" | "V3_DUPLICATE";
+  severity: "error" | "warning";
+  document_id: number | null;
+  field_id: number | null;
+  related_document_id: number | null;
+  message: string;
+  suggested_fix: string | null;
+  status: "open" | "resolved" | "waived";
+  resolution_note: string | null;
+  resolved_by: string | null;
+  resolved_at: string | null;
+}
+
+export interface FactorRead {
+  id: number;
+  factor_set_version: string;
+  key: string;
+  value: number;
+  unit: string;
+  source_title: string;
+  publisher: string;
+  source_url: string;
+  year: number;
+  is_fallback: boolean;
+  allowed: boolean;
+  uncertainty_type: string | null;
+  uncertainty_rel: number | null;
+  uncertainty_low: number | null;
+  uncertainty_high: number | null;
+  notes: string | null;
+  status: string;
+}
+
+export interface AssumptionRow {
+  id: number;
+  input_key: string;
+  value_used: number;
+  unit: string;
+  factor_id: number;
+  factor_set_version: string;
+  reason: string;
+  applied_by: string;
+  applied_at: string;
+  source_title?: string;
+  publisher?: string;
+  source_url?: string;
+  year?: number;
+}
+
+export interface TermBreakdown {
+  key: string;
+  name: string;
+  raw_tco2: number;
+  allocated_tco2: number;
+  fallback_based: boolean;
+}
+
+export interface Priority1Result {
+  version_number: number;
+  factor_set_version: string | null;
+  mc_seed: number;
+  result: {
+    alpha: number;
+    fuels: TermBreakdown[];
+    process: TermBreakdown[];
+    precursors: TermBreakdown[];
+    scope1_fuel_raw_tco2: number;
+    process_raw_tco2: number;
+    scope1_raw_tco2: number;
+    scope1_allocated_tco2: number;
+    scope2_raw_tco2: number;
+    scope2_allocated_tco2: number;
+    scope2_counted_tco2: number;
+    precursor_tco2: number;
+    total_tco2: number;
+    target_production_t: number;
+    see_tco2_per_t: number;
+    fallback_tco2: number;
+    fallback_share: number;
+    data_quality_label: "A" | "B" | "C";
+    factor_ids_used: number[];
+    notes: string[];
+  };
+  uncertainty: { p5: number; p50: number; p95: number; mean: number; std_dev: number; iterations: number };
+  factors_used: FactorRead[];
+  assumptions: AssumptionRow[];
+}
+
+export type ReviewStatusName = "Draft" | "User-Confirmed" | "Expert-Reviewed" | "Externally Verified";
+export type ActorRole = "exporter" | "reviewer" | "verifier";
+
+export interface PassportState {
+  version_number: number;
+  status: ReviewStatusName;
+  status_wording: string | null;
+  input_hash: string;
+  factor_set_version: string | null;
+  mc_seed: number | null;
+  has_result: boolean;
+  verifier_details: Record<string, string> | null;
+  allowed_next: ReviewStatusName[];
+  required_role: Partial<Record<ReviewStatusName, ActorRole>>;
+  result: Priority1Result | null;
+}
+
+export interface HistoryRow {
+  id: number;
+  version_number: number;
+  from: string | null;
+  to: string;
+  actor: string;
+  role: string;
+  note: string | null;
+  extra: Record<string, unknown> | null;
+  timestamp: string;
+}
+
+export interface DocumentMetadata {
+  supplier?: string | null;
+  account_number?: string | null;
+  utility_type?: string | null;
+  bill_number?: string | null;
+  bill_date?: string | null;
+  period_start?: string | null;
+  period_end?: string | null;
+}
+
+export type DocumentRecordWithMeta = DocumentRecordRead & DocumentMetadata & { is_excluded: boolean };
+
+export interface FieldAuditWithReview extends ExtractedFieldAuditRead {
+  field_type: string | null;
+  canonical_value: number | null;
+  canonical_unit: string | null;
+  reviewed: boolean;
+  reviewed_by: string | null;
+}
+
+export interface DuplicateDocumentBody {
+  detail: string;
+  existing_document: { id: number; document_hash: string; filename: string; workspace_id: string; url: string };
+}
+
+const enc = encodeURIComponent;
+
+export function upsertWorkspace(
+  workspaceId: string,
+  profile: {
+    company_name?: string;
+    installation_name?: string;
+    cn_code?: string;
+    reporting_start?: string | null;
+    reporting_end?: string | null;
+    inputs?: WorkspaceInputs;
+    actor?: string;
+  },
+): Promise<WorkspaceState> {
+  return request<WorkspaceState>(`/workspaces/${enc(workspaceId)}`, json("PUT", profile));
+}
+
+export function getWorkspaceState(workspaceId: string): Promise<WorkspaceState> {
+  return request<WorkspaceState>(`/workspaces/${enc(workspaceId)}`);
+}
+
+export function validateWorkspace(workspaceId: string, actor = "system"): Promise<Finding[]> {
+  return request<Finding[]>(`/workspaces/${enc(workspaceId)}/validate?actor=${enc(actor)}`, { method: "POST" });
+}
+
+export function waiveFinding(findingId: number, reason: string, actor: string): Promise<Finding> {
+  return request<Finding>(`/findings/${findingId}/waive`, json("POST", { reason, actor }));
+}
+
+export function resolveFinding(
+  findingId: number,
+  action: "resolve" | "keep_this" | "keep_other" | "distinct",
+  actor: string,
+  note: string,
+): Promise<Finding> {
+  return request<Finding>(`/findings/${findingId}/resolve`, json("POST", { action, actor, note }));
+}
+
+export function getGaps(workspaceId: string): Promise<GapSummary> {
+  return request<GapSummary>(`/workspaces/${enc(workspaceId)}/gaps`);
+}
+
+export function applyFallback(workspaceId: string, inputKey: string, reason: string, actor: string): Promise<GapSummary> {
+  return request<GapSummary>(
+    `/workspaces/${enc(workspaceId)}/gaps/${enc(inputKey)}/apply-fallback`,
+    json("POST", { reason, actor }),
+  );
+}
+
+export function withdrawAssumption(workspaceId: string, assumptionId: number, reason: string, actor: string) {
+  return request<GapSummary>(
+    `/workspaces/${enc(workspaceId)}/assumptions/${assumptionId}/withdraw`,
+    json("POST", { reason, actor }),
+  );
+}
+
+export function calculateWorkspace(workspaceId: string, seed?: number): Promise<Priority1Result> {
+  return request<Priority1Result>(`/workspaces/${enc(workspaceId)}/calculate`, json("POST", { seed }));
+}
+
+export function getPassport(workspaceId: string): Promise<PassportState> {
+  return request<PassportState>(`/passports/${enc(workspaceId)}`);
+}
+
+export function transitionPassport(
+  workspaceId: string,
+  body: { to: ReviewStatusName; note: string; actor: string; role: ActorRole; extra_fields: Record<string, unknown> },
+) {
+  return request<PassportState & { history: HistoryRow[] }>(`/passports/${enc(workspaceId)}/transition`, json("POST", body));
+}
+
+export function getPassportHistory(workspaceId: string): Promise<HistoryRow[]> {
+  return request<HistoryRow[]>(`/passports/${enc(workspaceId)}/history`);
+}
+
+export async function downloadServerPassportPdf(workspaceId: string): Promise<Blob> {
+  const response = await fetch(`${V1}/passports/${enc(workspaceId)}/pdf`, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Export failed: HTTP ${response.status}`);
+  return response.blob();
+}
+
+export function getRegisterFactors(version?: string): Promise<FactorRead[]> {
+  return request<FactorRead[]>(`/registry/factors${version ? `?version=${enc(version)}` : ""}`);
+}
+
+export function getDocument(documentHash: string): Promise<DocumentExtractionResult> {
+  return request<DocumentExtractionResult>(`/documents/${documentHash}`);
+}
+
+export function getWorkspaceDocuments(workspaceId: string): Promise<DocumentRecordWithMeta[]> {
+  return request<DocumentRecordWithMeta[]>(`/documents/workspace/${enc(workspaceId)}`);
+}
+
+export function getFieldsWithReview(documentHash: string): Promise<FieldAuditWithReview[]> {
+  return request<FieldAuditWithReview[]>(`/documents/${documentHash}/fields`);
+}
+
+export function updateDocumentMetadata(
+  documentHash: string,
+  metadata: DocumentMetadata & { actor: string; reason?: string },
+): Promise<DocumentRecordWithMeta> {
+  return request<DocumentRecordWithMeta>(`/documents/${documentHash}/metadata`, json("PATCH", metadata));
+}
+
+export function excludeDocument(documentHash: string, actor: string, reason: string) {
+  return request<DocumentRecordWithMeta>(`/documents/${documentHash}/exclude`, json("POST", { actor, reason }));
+}
+
+export function approveField(fieldId: number, actor: string): Promise<FieldAuditWithReview> {
+  return request<FieldAuditWithReview>(`/documents/fields/${fieldId}/approve`, json("POST", { actor }));
 }

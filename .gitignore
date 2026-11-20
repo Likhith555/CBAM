@@ -27,3 +27,7 @@ data/faiss_index/*.pkl
 Thumbs.db
 .vscode/
 .idea/
+
+# Test artefacts
+.coverage
+htmlcov/

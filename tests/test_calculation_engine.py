@@ -85,18 +85,18 @@ def test_mass_allocation_factor():
         compute_mass_allocation_factor(0.0, 500.0)
 
 
-def test_determine_delta_cn():
+def test_determine_delta_cn(db):
     # Steel fasteners (CN 7318 group) require indirect emissions
-    assert determine_delta_cn("7318 15 82") is True
-    assert determine_delta_cn("7318 16 00") is True
-    assert determine_delta_cn("7228 30") is True
+    assert determine_delta_cn("7318 15 82", db) is True
+    assert determine_delta_cn("7318 16 00", db) is True
+    assert determine_delta_cn("7228 30", db) is True
 
 
 # =====================================================================
 # 3. Deterministic Benchmark Scenario: Steel Fastener Manufacturing
 # =====================================================================
 
-def test_deterministic_calculation_benchmark():
+def test_deterministic_calculation_benchmark(db):
     """
     Known Benchmark Scenario for Indian Steel Fastener Exporter:
     - Target: 500 tonnes of Steel Fasteners (CN 7318 15 82)
@@ -161,7 +161,7 @@ def test_deterministic_calculation_benchmark():
         monte_carlo_iterations=2000,
     )
 
-    result = calculate_product_see(request)
+    result = calculate_product_see(request, db=db)
 
     # 1. Assert Allocation and CN flags
     assert result.allocation_factor_alpha == 0.8
@@ -195,7 +195,14 @@ def test_deterministic_calculation_benchmark():
 # 4. Precursor Fallback & Penalty Markup Test
 # =====================================================================
 
-def test_precursor_fallback_and_markup():
+def test_precursor_fallback_and_markup(db):
+    # Test-only reference row: the shipped seed deliberately contains no unapproved precursor default.
+    from app.db.models import CBAMDefaultValues
+
+    db.add(CBAMDefaultValues(category="precursor", item_name="Test alloy wire rod default", unit="tonne",
+                             ef_value=2.24, ef_unit="tCO2/t", source_reference="test fixture",
+                             cn_code="7228 30", markup_pct=10.0))
+    db.commit()
     """
     Verifies that when a precursor has no verified actual SEE, the engine:
     1. Uses the official fallback factor (2.24 tCO2/t for alloy wire rod).
@@ -228,7 +235,7 @@ def test_precursor_fallback_and_markup():
         run_monte_carlo=False,
     )
 
-    result = calculate_product_see(request)
+    result = calculate_product_see(request, db=db)
 
     # 2.24 * 1.10 = 2.464 tCO2/t
     # 105 tonnes * 2.464 = 258.72 tCO2
@@ -241,7 +248,7 @@ def test_precursor_fallback_and_markup():
 # 5. Indirect Emissions Toggle Test (delta_CN = 0)
 # =====================================================================
 
-def test_delta_cn_zero_excludes_indirect():
+def test_delta_cn_zero_excludes_indirect(db):
     """Verifies that if delta_CN is False, Scope 2 emissions are excluded from SEE numerator."""
     request = DeterministicCalculationRequest(
         reporting_period_id=103,
@@ -275,7 +282,7 @@ def test_delta_cn_zero_excludes_indirect():
     # Force delta_cn check
     from unittest.mock import patch
     with patch("app.modules.calculation.engine.determine_delta_cn", return_value=False):
-        result = calculate_product_see(request)
+        result = calculate_product_see(request, db=db)
 
     assert result.includes_indirect_delta_cn is False
     # Scope 2 calculated in background...
@@ -290,7 +297,7 @@ def test_delta_cn_zero_excludes_indirect():
 # 6. Monte Carlo Statistical Properties Test
 # =====================================================================
 
-def test_monte_carlo_statistical_properties():
+def test_monte_carlo_statistical_properties(db):
     """Verifies that the Monte Carlo engine produces valid statistical ordering: P5 <= P50 <= P95."""
     request = DeterministicCalculationRequest(
         reporting_period_id=104,
@@ -316,7 +323,7 @@ def test_monte_carlo_statistical_properties():
         monte_carlo_iterations=3000,
     )
 
-    result = calculate_product_see(request)
+    result = calculate_product_see(request, db=db)
     unc = result.uncertainty
     assert unc is not None
     assert unc.p5 < unc.p50 < unc.p95

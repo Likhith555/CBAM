@@ -188,3 +188,72 @@ def run_monte_carlo_simulation(
         std_dev=round(std_val, 6),
         iterations=iterations,
     )
+
+
+# =====================================================================
+# Priority 1: seeded Monte Carlo over resolved engine inputs (Task 3)
+#
+# Measured inputs use the fixed tolerances in settings (MC_TOL_*). An input
+# that came from a fallback uses the distribution stored on its register row,
+# so the band widens whenever a fallback is applied. The generator is
+# numpy.random.default_rng(seed) and the seed is stored in the passport.
+# =====================================================================
+
+from app.config import settings  # noqa: E402
+from app.schemas.workspace import EngineInputs, EngineValue  # noqa: E402
+
+
+def _measured_tolerance(role: str) -> float:
+    return {
+        "electricity": settings.MC_TOL_ELECTRICITY,
+        "fuel": settings.MC_TOL_FUEL,
+        "precursor": settings.MC_TOL_PRECURSOR,
+        "process_activity": settings.MC_TOL_FUEL,
+        "process_direct": settings.MC_TOL_PROCESS_DIRECT,
+        "factor": settings.MC_TOL_MEASURED_FACTOR,
+        "of": settings.MC_TOL_MEASURED_FACTOR,
+        "production": 0.0,
+    }.get(role, 0.0)
+
+
+def make_sampler(rng: np.random.Generator, iterations: int):
+    def sample(ev: EngineValue, role: str):
+        value = float(ev.value)
+        spec = ev.uncertainty
+        if spec.kind == "triangular" and spec.low is not None and spec.high is not None and spec.high > spec.low:
+            mode = min(max(value, spec.low), spec.high)
+            draws = rng.triangular(spec.low, mode, spec.high, size=iterations)
+        else:
+            rel = spec.rel if spec.kind == "relative" and spec.rel is not None else _measured_tolerance(role)
+            if rel <= 0 or value == 0:
+                return np.full(iterations, value)
+            draws = rng.normal(loc=value, scale=abs(value) * rel / 1.96, size=iterations)
+            draws = np.maximum(draws, abs(value) * 0.01)
+        if role == "of":
+            draws = np.clip(draws, 0.0, 1.0)
+        return draws
+
+    return sample
+
+
+def simulate_engine(
+    inputs: EngineInputs,
+    iterations: int = None,
+    seed: int = None,
+) -> UncertaintyDistributionResult:
+    """Seeded Monte Carlo for the Priority 1 engine. Same seed -> identical output."""
+    from app.modules.calculation.engine import _evaluate
+
+    iterations = iterations or settings.MC_DEFAULT_ITERATIONS
+    seed = settings.MC_DEFAULT_SEED if seed is None else seed
+    rng = np.random.default_rng(seed)
+    result = _evaluate(inputs, make_sampler(rng, iterations))
+    see = np.broadcast_to(np.asarray(result["see"], dtype=float), (iterations,))
+    return UncertaintyDistributionResult(
+        p5=float(np.percentile(see, 5)),
+        p50=float(np.percentile(see, 50)),
+        p95=float(np.percentile(see, 95)),
+        mean=float(np.mean(see)),
+        std_dev=float(np.std(see)),
+        iterations=iterations,
+    )

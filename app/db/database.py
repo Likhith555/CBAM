@@ -30,6 +30,27 @@ def init_db():
     # Keep this additive so existing workspaces, uploads, and audit records survive.
     if engine.dialect.name == "sqlite":
         inspector = inspect(engine)
+        additive_columns = {
+            "document_records": {
+                "supplier": "VARCHAR(255)", "account_number": "VARCHAR(100)",
+                "utility_type": "VARCHAR(50)", "bill_number": "VARCHAR(100)",
+                "bill_date": "DATE", "period_start": "DATE", "period_end": "DATE",
+                "is_excluded": "BOOLEAN DEFAULT 0",
+            },
+            "extracted_fields_audit": {
+                "field_type": "VARCHAR(30)", "canonical_value": "FLOAT",
+                "canonical_unit": "VARCHAR(30)", "reviewed": "BOOLEAN DEFAULT 0",
+                "reviewed_by": "VARCHAR(100)", "reviewed_at": "DATETIME",
+            },
+        }
+        for table, columns in additive_columns.items():
+            if table not in inspector.get_table_names():
+                continue
+            present = {column["name"] for column in inspector.get_columns(table)}
+            with engine.begin() as connection:
+                for name, ddl in columns.items():
+                    if name not in present:
+                        connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
         table_name = "cbam_default_values"
         if table_name in inspector.get_table_names():
             existing_columns = {column["name"] for column in inspector.get_columns(table_name)}

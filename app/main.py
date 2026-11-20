@@ -7,6 +7,9 @@ from app.db.seed import seed_database
 from app.api.document_router import router as document_router
 from app.api.calculation_router import router as calculation_router
 from app.api.reporting_router import router as reporting_router
+from app.api.workspace_router import router as workspace_router
+from app.api.passport_router import router as passport_router
+from app.api.registry_router import router as registry_router
 
 
 @asynccontextmanager
@@ -37,6 +40,9 @@ app.add_middleware(
 app.include_router(document_router, prefix=settings.API_V1_STR)
 app.include_router(calculation_router, prefix=settings.API_V1_STR)
 app.include_router(reporting_router, prefix=settings.API_V1_STR)
+app.include_router(workspace_router, prefix=settings.API_V1_STR)
+app.include_router(passport_router, prefix=settings.API_V1_STR)
+app.include_router(registry_router, prefix=settings.API_V1_STR)
 
 
 @app.get("/health", tags=["System"])

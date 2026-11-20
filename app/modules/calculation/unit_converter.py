@@ -153,3 +153,107 @@ def to_energy_gigajoules(quantity: float, unit: str, ncv_gj_per_unit: float = No
         raise ValueError(f"Net Calorific Value (NCV) is required to convert physical unit '{unit}' to Gigajoules.")
 
     return quantity * ncv_gj_per_unit
+
+
+# ---------------------------------------------------------------------
+# Canonical units per field type (validation rule V1 and the engine)
+# ---------------------------------------------------------------------
+
+class UnitError(ValueError):
+    """Unknown unit, or a unit that does not fit the field."""
+
+
+CANONICAL_UNITS: Dict[str, str] = {
+    "electricity": "MWh",
+    "liquid_fuel": "L",
+    "gas": "m3",
+    "mass": "t",
+    "see": "tCO2/t",
+}
+
+_LIQUID_TO_L: Dict[str, float] = {
+    "l": 1.0, "litre": 1.0, "litres": 1.0, "liter": 1.0, "liters": 1.0, "ltr": 1.0, "ltrs": 1.0,
+    "kl": 1000.0, "kilolitre": 1000.0, "kilolitres": 1000.0, "kiloliter": 1000.0,
+    "m3": 1000.0, "cubic metre": 1000.0, "cubic meter": 1000.0,
+    "ml": 0.001,
+}
+_GAS_TO_M3: Dict[str, float] = {
+    "m3": 1.0, "nm3": 1.0, "scm": 1.0, "sm3": 1.0, "cubic metre": 1.0, "cubic meter": 1.0,
+    "mmscm": 1_000_000.0, "thousand m3": 1000.0,
+}
+_MASS_TO_T: Dict[str, float] = {
+    "t": 1.0, "tonne": 1.0, "tonnes": 1.0, "mt": 1.0, "ton": 1.0, "tons": 1.0, "metric ton": 1.0,
+    "kg": 0.001, "kilogram": 0.001, "kilograms": 0.001, "g": 1e-6,
+    "quintal": 0.1, "quintals": 0.1,
+}
+_ELEC_TO_MWH: Dict[str, float] = {
+    "mwh": 1.0, "kwh": 0.001, "units": 0.001, "unit": 0.001, "gwh": 1000.0, "wh": 1e-6,
+}
+_SEE_TO_T_PER_T: Dict[str, float] = {
+    "tco2/t": 1.0, "tco2e/t": 1.0, "t co2/t": 1.0, "tco2/tonne": 1.0, "tco2e/tonne": 1.0,
+    "kgco2/kg": 1.0, "kgco2/t": 0.001, "kgco2e/t": 0.001,
+}
+_TABLES = {
+    "electricity": _ELEC_TO_MWH,
+    "liquid_fuel": _LIQUID_TO_L,
+    "gas": _GAS_TO_M3,
+    "mass": _MASS_TO_T,
+    "see": _SEE_TO_T_PER_T,
+}
+
+# Fuel register slug -> physical form, so the canonical unit is known.
+FUEL_FORMS: Dict[str, str] = {
+    "furnace_oil": "liquid_fuel",
+    "diesel": "liquid_fuel",
+    "natural_gas": "gas",
+    "lpg": "mass",
+}
+
+
+def _norm(unit: str) -> str:
+    u = (unit or "").strip().lower().replace("³", "3").replace("₂", "2")
+    u = re.sub(r"\s+", " ", u)
+    u = u.replace(".", "")
+    return u
+
+
+def canonical_factor(unit: str, field_type: str) -> float:
+    """Multiplier that converts one ``unit`` into the canonical unit of ``field_type``."""
+    if field_type not in _TABLES:
+        raise UnitError(f"Unknown field type '{field_type}'.")
+    u = _norm(unit)
+    table = _TABLES[field_type]
+    if u in table:
+        return table[u]
+    compact = u.replace(" ", "")
+    if compact in table:
+        return table[compact]
+    for other_type, other in _TABLES.items():
+        if other_type != field_type and (u in other or compact in other):
+            raise UnitError(
+                f"Unit '{unit}' is a {other_type.replace('_', ' ')} unit and does not fit a "
+                f"{field_type.replace('_', ' ')} field (expected {CANONICAL_UNITS[field_type]})."
+            )
+    raise UnitError(f"Unknown unit '{unit}' for a {field_type.replace('_', ' ')} field.")
+
+
+def to_canonical(value: float, unit: str, field_type: str) -> float:
+    return value * canonical_factor(unit, field_type)
+
+
+def ncv_to_canonical(value: float, ncv_unit: str, fuel_form: str) -> float:
+    """Converts an NCV such as 'GJ/kL' to GJ per canonical unit of the fuel form."""
+    u = _norm(ncv_unit)
+    if "/" not in u:
+        raise UnitError(f"NCV unit '{ncv_unit}' must be energy per quantity, e.g. GJ/L.")
+    energy, per = (part.strip() for part in u.split("/", 1))
+    if energy not in ENERGY_CONVERSIONS_TO_GJ:
+        raise UnitError(f"NCV energy unit '{energy}' is not recognised.")
+    try:
+        per_factor = canonical_factor(per, fuel_form)
+    except UnitError as exc:
+        raise UnitError(
+            f"NCV unit '{ncv_unit}' does not match the fuel quantity "
+            f"(expected GJ/{CANONICAL_UNITS[fuel_form]}): {exc}"
+        ) from exc
+    return value * ENERGY_CONVERSIONS_TO_GJ[energy] / per_factor

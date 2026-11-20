@@ -92,7 +92,7 @@ def test_rag_strict_hallucination_guardrail():
     # An entirely unrelated, out-of-domain question should trigger the refusal guardrail
     req = RAGQueryRequest(query="What is the recipe for baking chocolate sourdough croissants?", top_k=2)
     resp = answer_regulatory_query(req)
-    assert "Information not found in the indexed official EC material" in resp.answer
+    assert "No passage relevant to this question was found" in resp.answer
     assert len(resp.citations) == 0
 
 
